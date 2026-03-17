@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOGDIR="${HOME}/scraplogs"
+mkdir -p "$LOGDIR"
+
+TS="$(date +%Y%m%d-%H%M%S)"
+BASE="session-${TS}"
+
+RAW_LOG="${LOGDIR}/${BASE}.log"
+TIMING_LOG="${LOGDIR}/${BASE}.timing"
+ANNOTATED_LOG="${LOGDIR}/${BASE}.annotated.log"
+STATE_FILE="${LOGDIR}/${BASE}.state.json"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+WATCHER_SCRIPT="${WATCHER_SCRIPT:-${HOME}/watch_session.py}"
+MODEL="${OPENAI_MODEL:-gpt-5}"
+
+# 最新セッションへのリンクを張る
+ln -sfn "$RAW_LOG" "${LOGDIR}/current.log"
+ln -sfn "$TIMING_LOG" "${LOGDIR}/current.timing"
+ln -sfn "$ANNOTATED_LOG" "${LOGDIR}/current.annotated.log"
+ln -sfn "$STATE_FILE" "${LOGDIR}/current.state.json"
+
+WATCHER_PID=""
+
+cleanup() {
+  set +e
+
+  if [[ -n "$WATCHER_PID" ]] && kill -0 "$WATCHER_PID" 2>/dev/null; then
+    kill "$WATCHER_PID" 2>/dev/null || true
+    wait "$WATCHER_PID" 2>/dev/null || true
+  fi
+
+  # 最後の取りこぼしを flush
+  if [[ -f "$RAW_LOG" ]]; then
+    "$PYTHON_BIN" "$WATCHER_SCRIPT" \
+      --raw-log "$RAW_LOG" \
+      --annotated-log "$ANNOTATED_LOG" \
+      --state-file "$STATE_FILE" \
+      --model "$MODEL" \
+      --max-lines 100 \
+      --max-commands 5 \
+      --max-seconds 0 \
+      --once \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "OPENAI_API_KEY が未設定です" >&2
+  exit 1
+fi
+
+echo "raw log      : $RAW_LOG"
+echo "timing log   : $TIMING_LOG"
+echo "annotated log: $ANNOTATED_LOG"
+echo "state file   : $STATE_FILE"
+echo "watcher      : $WATCHER_SCRIPT"
+
+# watcher を先に起動
+"$PYTHON_BIN" "$WATCHER_SCRIPT" \
+  --raw-log "$RAW_LOG" \
+  --annotated-log "$ANNOTATED_LOG" \
+  --state-file "$STATE_FILE" \
+  --model "$MODEL" \
+  --max-lines 100 \
+  --max-commands 5 \
+  --max-seconds 60 \
+  --poll-interval 5
+WATCHER_PID=$!
+
+echo "watcher pid  : $WATCHER_PID"
+echo "worklog start"
+
+# ここから先の対話シェル操作が script に記録される
+script -q -f -O "$RAW_LOG" -T "$TIMING_LOG"
+
+echo "worklog end"
